@@ -49,12 +49,12 @@ python main.py
 | level | TEXT | Уровень пользователя |
 
 
-## 🛠 Технологии
-● Python 3.8+
-● aiohttp (асинхронные HTTP-запросы)
-● aiosqlite (асинхронная работа с БД)
-● BeautifulSoup (парсинг HTML)
-● asyncio (конкурентное выполнение)
+## 🛠 Технологии  
+- **Python 3.8+**  
+- [aiohttp](https://docs.aiohttp.org/en/stable/) – асинхронные HTTP-запросы  
+- [aiosqlite](https://aiosqlite.omnilib.dev/) – асинхронная работа с БД  
+- [BeautifulSoup](https://www.crummy.com/software/BeautifulSoup/) – парсинг HTML  
+- [asyncio](https://docs.python.org/3/library/asyncio.html) – конкурентное выполнение  
 
 
 ## Лицензия
