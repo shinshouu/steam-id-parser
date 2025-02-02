@@ -1,68 +1,98 @@
-import aiohttp
 import asyncio
+import aiohttp
+import aiosqlite
+import logging
+from itertools import product
 from bs4 import BeautifulSoup
-import sqlite3
+from config import DB_PATH, BASE_URL, COMBINATION_LENGTH, CONCURRENT_REQUESTS, TIMEOUT, BATCH_SIZE, CHARACTERS
 
-async def fetch_data(session, profile_url):
-    async with session.get(profile_url) as response:
-        return await response.text()
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-async def get_user_data(profile_url, session):
+
+async def fetch_data(session, url):
+    """Запрашивает HTML-страницу и возвращает её содержимое."""
+    try:
+        async with session.get(url, timeout=TIMEOUT) as response:
+            if response.status == 200:
+                return await response.text()
+            logging.warning(f"Failed request {url} with status {response.status}")
+    except asyncio.TimeoutError:
+        logging.warning(f"Timeout for {url}. Retrying in 5 seconds...")
+        await asyncio.sleep(5)
+    except aiohttp.ClientError as e:
+        logging.error(f"Request error for {url}: {e}")
+    return None
+
+
+async def parse_profile(session, profile_url):
+    """Парсит страницу Steam-профиля, извлекая имя и уровень."""
     html_content = await fetch_data(session, profile_url)
+    if not html_content:
+        return None, None
+
     soup = BeautifulSoup(html_content, 'html.parser')
 
+    # Проверка на ошибку "Профиль не найден"
     error_message = soup.find('div', {'id': 'message'})
     if error_message and 'Указанный профиль не найден.' in error_message.text:
         return None, None
 
-    name_tag = soup.find('span', class_='actual_persona_name')
-    name = name_tag.text if name_tag else 'Unknown'
+    name = soup.find('span', class_='actual_persona_name')
+    level = soup.find('div', class_='persona_name persona_level')
 
-    level_tag = soup.find('div', class_='persona_name persona_level')
-    level_text = level_tag.text if level_tag else ''
-    level = level_text.replace('Уровень', '').strip() if level_text else 'Unknown'
+    return (name.text.strip() if name else "Unknown",
+            level.text.replace('Уровень', '').strip() if level else "Unknown")
 
-    return name, level
 
-async def process_combination(combination, session, cursor, semaphore, conn):
-    base_url = "https://steamcommunity.com/id/"
-    profile_link = base_url + combination
+async def process_combination(combination, session, semaphore, db):
+    """Обрабатывает одну комбинацию ID, парсит и сохраняет в БД."""
+    profile_url = f"{BASE_URL}{combination}"
 
     async with semaphore:
-        try:
-            name, level = await asyncio.wait_for(get_user_data(profile_link, session), timeout=30)
-            if name is not None and level is not None:
-                cursor.execute('INSERT INTO users (profile_link, name, level) VALUES (?, ?, ?)', (profile_link, name, level))
-                print(f"Processed: {profile_link} - {name} - {level}")
-                conn.commit()
-        except asyncio.TimeoutError:
-            print(f"Timeout error for {profile_link}. Waiting for 5 seconds...")
-            await asyncio.sleep(5)
+        name, level = await parse_profile(session, profile_url)
+        if name and level:
+            await db.execute(
+                "INSERT OR IGNORE INTO users (profile_link, name, level) VALUES (?, ?, ?)",
+                (profile_url, name, level)
+            )
+            logging.info(f"Processed: {profile_url} - {name} - {level}")
+            await db.commit()
+
+
+async def generate_combinations(length):
+    """Генерирует комбинации указанной длины."""
+    return ["".join(combo) for combo in product(CHARACTERS, repeat=length)]
+
+
+async def init_db():
+    """Инициализирует базу данных."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                profile_link TEXT UNIQUE,
+                name TEXT,
+                level TEXT
+            )
+        """)
+
 
 async def main():
-    conn = sqlite3.connect('user_data.db')
-    cursor = conn.cursor()
+    """Основной цикл сбора данных."""
+    await init_db()
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            profile_link TEXT,
-            name TEXT,
-            level TEXT
-        )
-    ''')
+    async with aiosqlite.connect(DB_PATH) as db, aiohttp.ClientSession() as session:
+        semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
+        combinations = await generate_combinations(COMBINATION_LENGTH)
 
-    characters = "abcdefghijklmnopqrstuvwxyz1234567890-_"
-    combinations = [a + b + c for a in characters for b in characters for c in characters]
+        for i in range(0, len(combinations), BATCH_SIZE):
+            batch = combinations[i:i + BATCH_SIZE]
+            tasks = [process_combination(comb, session, semaphore, db) for comb in batch]
+            await asyncio.gather(*tasks)
 
-    semaphore = asyncio.Semaphore(50)
-    async with aiohttp.ClientSession() as session:
-        tasks = [process_combination(combination, session, cursor, semaphore, conn) for combination in combinations]
-        await asyncio.gather(*tasks)
+    logging.info("Parsing and data insertion complete.")
 
-    conn.close()
-    print("Parsing and data insertion complete.")
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+    asyncio.run(main())
